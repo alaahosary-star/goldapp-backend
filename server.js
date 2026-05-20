@@ -23,6 +23,12 @@ app.get('/api/gold/local', async (req, res) => {
   res.status(data.success ? 200 : 502).json(data);
 });
 
+app.get('/api/gold/history', async (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+  const data = await goldService.fetchGoldHistory(days);
+  res.status(data.success ? 200 : 502).json(data);
+});
+
 // ============ CURRENCY ============
 
 app.get('/api/currency/rates', async (req, res) => {
