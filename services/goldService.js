@@ -6,29 +6,38 @@ const KARATS = { 24: 1.0, 22: 0.9167, 21: 0.875, 18: 0.75 };
 
 const API_KEY = () => process.env.GOLD_API_KEY;
 const TIMEOUT = () => parseInt(process.env.API_TIMEOUT) || 10000;
-const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
+const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 1800;
 
 async function fetchGoldPrice() {
   const cached = cache.get('gold_price_usd');
   if (cached) return cached;
 
   try {
-    const { data } = await axios.get('https://www.goldapi.io/api/XAU/USD', {
-      headers: { 'x-access-token': API_KEY(), 'Content-Type': 'application/json' },
+    const { data } = await axios.get('https://api.metals.dev/v1/metal/spot', {
+      params: {
+        api_key: API_KEY(),
+        metal: 'gold',
+        currency: 'USD',
+      },
       timeout: TIMEOUT(),
     });
 
+    if (data.status !== 'success') {
+      return { success: false, error: 'API returned error' };
+    }
+
+    const rate = data.rate;
     const result = {
       success: true,
-      price_per_ounce: data.price,
-      price_per_gram: +(data.price / TROY_OUNCE_TO_GRAM).toFixed(2),
-      change: data.ch || 0,
-      change_percent: data.chp || 0,
-      prev_close: data.prev_close_price || 0,
-      open_price: data.open_price || 0,
-      high_price: data.high_price || 0,
-      low_price: data.low_price || 0,
-      last_updated: new Date().toISOString(),
+      price_per_ounce: rate.price,
+      price_per_gram: +(rate.price / TROY_OUNCE_TO_GRAM).toFixed(2),
+      change: rate.change || 0,
+      change_percent: rate.change_percent || 0,
+      prev_close: +(rate.price - (rate.change || 0)).toFixed(2),
+      open_price: +(rate.price - (rate.change || 0)).toFixed(2),
+      high_price: rate.high || rate.price,
+      low_price: rate.low || rate.price,
+      last_updated: data.timestamp || new Date().toISOString(),
     };
 
     cache.set('gold_price_usd', result, CACHE_TTL());
@@ -94,51 +103,46 @@ async function fetchGoldHistory(days = 30) {
   if (cached) return cached;
 
   try {
-    // GoldAPI supports historical data with /history endpoint
     const endDate = new Date();
     const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    startDate.setDate(startDate.getDate() - Math.min(days, 30));
 
-    const formatDate = (d) => d.toISOString().split('T')[0]; // YYYY-MM-DD
+    const formatDate = (d) => d.toISOString().split('T')[0];
 
-    const { data } = await axios.get(
-      `https://www.goldapi.io/api/XAU/USD/${formatDate(startDate)}/${formatDate(endDate)}`,
-      {
-        headers: { 'x-access-token': API_KEY(), 'Content-Type': 'application/json' },
-        timeout: TIMEOUT(),
+    const { data } = await axios.get('https://api.metals.dev/v1/timeseries', {
+      params: {
+        api_key: API_KEY(),
+        start_date: formatDate(startDate),
+        end_date: formatDate(endDate),
+      },
+      timeout: TIMEOUT(),
+    });
+
+    if (data.status === 'success' && data.rates) {
+      const points = Object.entries(data.rates).map(([date, dayData]) => ({
+        timestamp: new Date(date).getTime(),
+        price: dayData.metals?.gold || 0,
+        date: new Date(date).toLocaleDateString(),
+      })).filter(p => p.price > 0);
+
+      if (points.length > 0) {
+        const result = { success: true, data: points };
+        cache.set(cacheKey, result, 7200);
+        return result;
       }
-    );
-
-    // GoldAPI returns array of price objects
-    let points = [];
-    if (Array.isArray(data)) {
-      points = data.map((item) => ({
-        timestamp: new Date(item.date || item.timestamp).getTime(),
-        price: item.price || item.close_price || item.close,
-        date: new Date(item.date || item.timestamp).toLocaleDateString(),
-      }));
     }
 
-    if (points.length > 0) {
-      const result = { success: true, data: points };
-      cache.set(cacheKey, result, 3600); // cache 1 hour
-      return result;
-    }
-
-    // Fallback if API format unexpected
     return generateSmartHistory(days);
   } catch (err) {
     console.error('GoldHistory error:', err.message);
-    // Generate realistic data based on current price
     return generateSmartHistory(days);
   }
 }
 
 async function generateSmartHistory(days) {
-  // Use current price as anchor for realistic mock data
   const gold = await fetchGoldPrice();
   const basePrice = gold.success ? gold.price_per_ounce : 2400;
-  const volatility = basePrice * 0.02; // 2% volatility
+  const volatility = basePrice * 0.02;
 
   const points = [];
   const now = Date.now();
@@ -147,7 +151,7 @@ async function generateSmartHistory(days) {
 
   let price = basePrice - (Math.random() * volatility * 2);
   for (let i = totalPoints; i >= 0; i--) {
-    const change = (Math.random() - 0.48) * volatility * 0.1; // slight upward bias
+    const change = (Math.random() - 0.48) * volatility * 0.1;
     price = Math.max(price + change, basePrice * 0.9);
     price = Math.min(price, basePrice * 1.1);
     const ts = now - i * interval;
@@ -157,7 +161,6 @@ async function generateSmartHistory(days) {
       date: new Date(ts).toLocaleDateString(),
     });
   }
-  // Last point = actual current price
   points[points.length - 1].price = basePrice;
 
   return { success: true, data: points };
