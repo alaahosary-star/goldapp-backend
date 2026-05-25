@@ -49,7 +49,7 @@ async function fetchFromGoldPriceZ() {
   return buildResult(price, prev, high, low, data.gmt_ounce_price_usd_updated, 'GoldPriceZ (XAU/USD Spot)');
 }
 
-// ── Source 2: Yahoo Finance v8 chart — GC=F (الوحيد المؤكد من Render) ───────
+// ── Source 2: Yahoo Finance v8 chart — GC=F ──────────────────────────────────
 async function fetchFromYahoo() {
   const { data } = await axios.get(
     'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
@@ -67,9 +67,15 @@ async function fetchFromYahoo() {
   const price = meta.regularMarketPrice || meta.previousClose;
   if (!price || price <= 0) throw new Error('Yahoo: invalid price');
 
-  const prev = meta.previousClose || price;
+  // نأخذ سعر إغلاق أمس الحقيقي من بيانات الـ chart (مش meta.previousClose اللي بيتساوى أحياناً مع الحالي)
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  const validCloses = closes.filter(c => c && c > 0);
+  const prev = validCloses.length >= 2
+    ? validCloses[validCloses.length - 2]   // إغلاق اليوم السابق فعلاً
+    : (meta.chartPreviousClose || meta.previousClose || price);
+
   return buildResult(
-    price, prev,
+    price, +prev.toFixed(2),
     meta.regularMarketDayHigh || price,
     meta.regularMarketDayLow  || price,
     new Date().toISOString(),
