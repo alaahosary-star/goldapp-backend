@@ -49,38 +49,32 @@ async function fetchFromGoldPriceZ() {
   return buildResult(price, prev, high, low, data.gmt_ounce_price_usd_updated, 'GoldPriceZ (XAU/USD Spot)');
 }
 
-// ── Source 2: Yahoo Finance — quote API يجرب XAUUSD=X أولاً ثم GC=F ─────────
+// ── Source 2: Yahoo Finance v8 chart — GC=F (الوحيد المؤكد من Render) ───────
 async function fetchFromYahoo() {
-  // يجرب الـ spot أولاً ثم الـ futures
-  for (const sym of ['XAUUSD=X', 'GC=F']) {
-    try {
-      const { data } = await axios.get(
-        'https://query1.finance.yahoo.com/v7/finance/quote',
-        {
-          params: { symbols: sym, fields: 'regularMarketPrice,regularMarketPreviousClose,regularMarketDayHigh,regularMarketDayLow,regularMarketOpen' },
-          timeout: TIMEOUT(),
-          headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-        }
-      );
-
-      const q = data?.quoteResponse?.result?.[0];
-      if (!q) continue;
-
-      const price = q.regularMarketPrice;
-      if (!price || price <= 0 || price > 100000) continue;
-
-      const prev  = q.regularMarketPreviousClose || price;
-      const high  = q.regularMarketDayHigh       || price;
-      const low   = q.regularMarketDayLow        || price;
-
-      console.log(`✅ Yahoo (${sym}): $${price}`);
-      return buildResult(price, prev, high, low, new Date().toISOString(),
-        sym === 'XAUUSD=X' ? 'Yahoo Finance (XAU/USD Spot)' : 'Yahoo Finance (GC=F Futures)');
-    } catch (e) {
-      console.error(`❌ Yahoo ${sym}:`, e.message);
+  const { data } = await axios.get(
+    'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
+    {
+      params: { interval: '1d', range: '5d' },
+      timeout: TIMEOUT(),
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
     }
-  }
-  throw new Error('Yahoo: all symbols failed');
+  );
+
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error('Yahoo: no result');
+
+  const meta  = result.meta;
+  const price = meta.regularMarketPrice || meta.previousClose;
+  if (!price || price <= 0) throw new Error('Yahoo: invalid price');
+
+  const prev = meta.previousClose || price;
+  return buildResult(
+    price, prev,
+    meta.regularMarketDayHigh || price,
+    meta.regularMarketDayLow  || price,
+    new Date().toISOString(),
+    'Yahoo Finance (GC=F)'
+  );
 }
 
 // ── Source 3: Metals.dev (100 req/month) ────────────────────────────────────
