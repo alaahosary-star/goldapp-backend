@@ -149,9 +149,8 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'Stooq',       fn: fetchFromStooq },
-    { name: 'Yahoo GC=F',  fn: fetchFromYahoo },
     { name: 'GoldPriceZ',  fn: fetchFromGoldPriceZ },
+    { name: 'Yahoo GC=F',  fn: fetchFromYahoo },
     { name: 'Metals.dev',  fn: fetchFromMetalsDev },
   ];
 
