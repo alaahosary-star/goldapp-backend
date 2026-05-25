@@ -9,10 +9,25 @@ const GOLDPRICEZ_KEY = () => process.env.GOLDPRICEZ_API_KEY;
 const TIMEOUT = () => parseInt(process.env.API_TIMEOUT) || 10000;
 const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
 
-// ── Source 1: Yahoo Finance (COMEX GC=F) — مجاني، بدون مفتاح، من البورصة مباشرة ──
+// ── Source 1: Yahoo Finance — مجاني، بدون مفتاح، من البورصة مباشرة ──
 async function fetchFromYahoo() {
+  // Try XAU=X (spot) first, fall back to GC=F (futures)
+  const symbols = ['XAU=X', 'GC=F'];
+  let lastErr;
+  for (const symbol of symbols) {
+    try {
+      return await fetchYahooSymbol(symbol);
+    } catch (e) {
+      lastErr = e;
+      console.warn(`Yahoo ${symbol} failed:`, e.message);
+    }
+  }
+  throw lastErr;
+}
+
+async function fetchYahooSymbol(symbol) {
   const { data } = await axios.get(
-    'https://query1.finance.yahoo.com/v8/finance/chart/XAU=X',
+    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`,
     {
       params: { interval: '1d', range: '5d' },
       timeout: TIMEOUT(),
@@ -45,7 +60,7 @@ async function fetchFromYahoo() {
     high_price: meta.regularMarketDayHigh || price,
     low_price: meta.regularMarketDayLow || price,
     last_updated: new Date().toISOString(),
-    source: 'Yahoo Finance (COMEX)',
+    source: `Yahoo Finance (${symbol})`,
   };
 }
 
@@ -199,7 +214,7 @@ async function fetchGoldHistory(days = 30) {
   try {
     const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
     const { data } = await axios.get(
-      'https://query1.finance.yahoo.com/v8/finance/chart/XAU=X',
+      'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
       {
         params: { interval: '1d', range },
         timeout: TIMEOUT(),
