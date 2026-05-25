@@ -28,6 +28,27 @@ function buildResult(price, prevClose, high, low, updatedAt, source) {
   };
 }
 
+// ── Source 0: open.er-api.com — XAU من نفس API العملات (مجاني، بدون مفتاح) ──
+async function fetchFromErApiXAU() {
+  const { data } = await axios.get('https://open.er-api.com/v6/latest/USD', {
+    timeout: TIMEOUT(),
+  });
+
+  if (data.result !== 'success') throw new Error('ErApi: non-success');
+
+  const xauRate = data.rates?.XAU; // كم أونصة في الدولار الواحد
+  if (!xauRate || xauRate <= 0) throw new Error('ErApi: XAU not in rates');
+
+  const price = +(1 / xauRate).toFixed(2); // سعر الأونصة بالدولار
+  if (price < 500 || price > 20000) throw new Error('ErApi: price out of range');
+
+  const prev = cache.get('erapi_xau_prev') || price;
+  cache.set('erapi_xau_prev', price, 86400);
+
+  return buildResult(price, prev, price, price,
+    data.time_last_update_utc, 'Spot (XAU/USD)');
+}
+
 // ── Source 1: GoldPriceZ (44K req/month) ────────────────────────────────────
 async function fetchFromGoldPriceZ() {
   const key = GOLDPRICEZ_KEY();
@@ -104,6 +125,7 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
+    { name: 'ErApi XAU',  fn: fetchFromErApiXAU },
     { name: 'GoldPriceZ', fn: fetchFromGoldPriceZ },
     { name: 'Yahoo',      fn: fetchFromYahoo },
     { name: 'Metals.dev', fn: fetchFromMetalsDev },
