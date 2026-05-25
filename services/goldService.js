@@ -9,32 +9,47 @@ const GOLDPRICEZ_KEY = () => process.env.GOLDPRICEZ_API_KEY;
 const TIMEOUT = () => parseInt(process.env.API_TIMEOUT) || 10000;
 const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
 
-// ── Source 1: Yahoo Finance — مجاني، بدون مفتاح، من البورصة مباشرة ──
-async function fetchFromYahoo() {
-  // Try XAU=X (spot) first, fall back to GC=F (futures)
-  const symbols = ['XAU=X', 'GC=F'];
-  let lastErr;
-  for (const symbol of symbols) {
-    try {
-      return await fetchYahooSymbol(symbol);
-    } catch (e) {
-      lastErr = e;
-      console.warn(`Yahoo ${symbol} failed:`, e.message);
+// ── Source 1: Stooq.com — XAU/USD سعر فوري حقيقي، مجاني، بدون مفتاح ──
+async function fetchFromStooq() {
+  const { data } = await axios.get(
+    'https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlcv&e=json',
+    {
+      timeout: TIMEOUT(),
+      headers: { 'User-Agent': 'Mozilla/5.0' },
     }
-  }
-  throw lastErr;
+  );
+
+  const sym = data?.symbols?.[0];
+  const price = sym?.close || sym?.open;
+  if (!price || price <= 0) throw new Error('Stooq: invalid price');
+
+  const prevClose = sym?.open || price;
+  const change = +(price - prevClose).toFixed(2);
+  const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+
+  return {
+    success: true,
+    price_per_ounce: price,
+    price_per_gram: +(price / TROY_OUNCE_TO_GRAM).toFixed(2),
+    change,
+    change_percent: changePercent,
+    prev_close: prevClose,
+    open_price: sym?.open || prevClose,
+    high_price: sym?.high || price,
+    low_price: sym?.low || price,
+    last_updated: new Date().toISOString(),
+    source: 'Stooq (XAU/USD Spot)',
+  };
 }
 
-async function fetchYahooSymbol(symbol) {
+// ── Source 2: Yahoo Finance GC=F (Futures) ──
+async function fetchFromYahoo() {
   const { data } = await axios.get(
-    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`,
+    'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
     {
       params: { interval: '1d', range: '5d' },
       timeout: TIMEOUT(),
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-      },
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
     }
   );
 
@@ -60,7 +75,7 @@ async function fetchYahooSymbol(symbol) {
     high_price: meta.regularMarketDayHigh || price,
     low_price: meta.regularMarketDayLow || price,
     last_updated: new Date().toISOString(),
-    source: `Yahoo Finance (${symbol})`,
+    source: 'Yahoo Finance (GC=F)',
   };
 }
 
@@ -134,9 +149,10 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'Yahoo Finance', fn: fetchFromYahoo },
-    { name: 'GoldPriceZ',   fn: fetchFromGoldPriceZ },
-    { name: 'Metals.dev',   fn: fetchFromMetalsDev },
+    { name: 'Stooq',       fn: fetchFromStooq },
+    { name: 'Yahoo GC=F',  fn: fetchFromYahoo },
+    { name: 'GoldPriceZ',  fn: fetchFromGoldPriceZ },
+    { name: 'Metals.dev',  fn: fetchFromMetalsDev },
   ];
 
   for (const source of sources) {
