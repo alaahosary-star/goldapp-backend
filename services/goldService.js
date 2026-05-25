@@ -6,8 +6,50 @@ const KARATS = { 24: 1.0, 22: 0.9167, 21: 0.875, 18: 0.75 };
 
 const API_KEY = () => process.env.GOLD_API_KEY;
 const GOLDPRICEZ_KEY = () => process.env.GOLDPRICEZ_API_KEY;
+const ALPHAVANTAGE_KEY = () => process.env.ALPHAVANTAGE_API_KEY;
 const TIMEOUT = () => parseInt(process.env.API_TIMEOUT) || 10000;
 const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
+
+// ── Source 0: Alpha Vantage — XAU/USD سعر فوري حقيقي ──
+async function fetchFromAlphaVantage() {
+  const avKey = ALPHAVANTAGE_KEY();
+  if (!avKey) throw new Error('No Alpha Vantage key');
+
+  const { data } = await axios.get('https://www.alphavantage.co/query', {
+    params: {
+      function: 'CURRENCY_EXCHANGE_RATE',
+      from_currency: 'XAU',
+      to_currency: 'USD',
+      apikey: avKey,
+    },
+    timeout: TIMEOUT(),
+  });
+
+  const info = data?.['Realtime Currency Exchange Rate'];
+  if (!info) throw new Error('AlphaVantage: no data');
+
+  const price = parseFloat(info['5. Exchange Rate']);
+  if (!price || price <= 0) throw new Error('AlphaVantage: invalid price');
+
+  // Alpha Vantage gives price per troy ounce for XAU
+  const prevClose = parseFloat(info['8. Bid Price']) || price;
+  const change = +(price - prevClose).toFixed(2);
+  const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+
+  return {
+    success: true,
+    price_per_ounce: price,
+    price_per_gram: +(price / TROY_OUNCE_TO_GRAM).toFixed(2),
+    change,
+    change_percent: changePercent,
+    prev_close: prevClose,
+    open_price: prevClose,
+    high_price: price,
+    low_price: price,
+    last_updated: info['6. Last Refreshed'] || new Date().toISOString(),
+    source: 'Alpha Vantage (XAU/USD Spot)',
+  };
+}
 
 // ── Source 1: Stooq.com — XAU/USD سعر فوري حقيقي، مجاني، بدون مفتاح ──
 async function fetchFromStooq() {
@@ -149,9 +191,11 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'GoldPriceZ',  fn: fetchFromGoldPriceZ },
-    { name: 'Yahoo GC=F',  fn: fetchFromYahoo },
-    { name: 'Metals.dev',  fn: fetchFromMetalsDev },
+    { name: 'Alpha Vantage', fn: fetchFromAlphaVantage },
+    { name: 'GoldPriceZ',   fn: fetchFromGoldPriceZ },
+    { name: 'Stooq',        fn: fetchFromStooq },
+    { name: 'Yahoo GC=F',   fn: fetchFromYahoo },
+    { name: 'Metals.dev',   fn: fetchFromMetalsDev },
   ];
 
   for (const source of sources) {
