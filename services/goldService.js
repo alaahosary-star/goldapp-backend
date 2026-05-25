@@ -12,7 +12,7 @@ const CACHE_TTL = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
 // ── Source 1: Yahoo Finance (COMEX GC=F) — مجاني، بدون مفتاح، من البورصة مباشرة ──
 async function fetchFromYahoo() {
   const { data } = await axios.get(
-    'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
+    'https://query1.finance.yahoo.com/v8/finance/chart/XAU=X',
     {
       params: { interval: '1d', range: '5d' },
       timeout: TIMEOUT(),
@@ -199,7 +199,7 @@ async function fetchGoldHistory(days = 30) {
   try {
     const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
     const { data } = await axios.get(
-      'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
+      'https://query1.finance.yahoo.com/v8/finance/chart/XAU=X',
       {
         params: { interval: '1d', range },
         timeout: TIMEOUT(),
