@@ -84,41 +84,51 @@ async function fetchFromStooq() {
   };
 }
 
-// ── Source 2: Yahoo Finance GC=F (Futures) ──
+// ── Source 2: Yahoo Finance — XAUUSD=X (Spot) then GC=F (Futures) fallback ──
 async function fetchFromYahoo() {
-  const { data } = await axios.get(
-    'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
-    {
-      params: { interval: '1d', range: '5d' },
-      timeout: TIMEOUT(),
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+  const symbols = ['XAUUSD=X', 'GC=F'];
+
+  for (const symbol of symbols) {
+    try {
+      const { data } = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`,
+        {
+          params: { interval: '1d', range: '5d' },
+          timeout: TIMEOUT(),
+          headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+        }
+      );
+
+      const result = data?.chart?.result?.[0];
+      if (!result) continue;
+
+      const meta = result.meta;
+      const price = meta.regularMarketPrice || meta.previousClose;
+      if (!price || price > 100000 || price <= 0) continue;
+
+      const prevClose = meta.previousClose || price;
+      const change = +(price - prevClose).toFixed(2);
+      const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+
+      return {
+        success: true,
+        price_per_ounce: price,
+        price_per_gram: +(price / TROY_OUNCE_TO_GRAM).toFixed(2),
+        change,
+        change_percent: changePercent,
+        prev_close: prevClose,
+        open_price: meta.regularMarketOpen || prevClose,
+        high_price: meta.regularMarketDayHigh || price,
+        low_price: meta.regularMarketDayLow || price,
+        last_updated: new Date().toISOString(),
+        source: `Yahoo Finance (${symbol})`,
+      };
+    } catch (e) {
+      console.error(`Yahoo ${symbol} failed:`, e.message);
     }
-  );
+  }
 
-  const result = data?.chart?.result?.[0];
-  if (!result) throw new Error('Yahoo: no result');
-
-  const meta = result.meta;
-  const price = meta.regularMarketPrice || meta.previousClose;
-  if (!price || price <= 0) throw new Error('Yahoo: invalid price');
-
-  const prevClose = meta.previousClose || price;
-  const change = +(price - prevClose).toFixed(2);
-  const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
-
-  return {
-    success: true,
-    price_per_ounce: price,
-    price_per_gram: +(price / TROY_OUNCE_TO_GRAM).toFixed(2),
-    change,
-    change_percent: changePercent,
-    prev_close: prevClose,
-    open_price: meta.regularMarketOpen || prevClose,
-    high_price: meta.regularMarketDayHigh || price,
-    low_price: meta.regularMarketDayLow || price,
-    last_updated: new Date().toISOString(),
-    source: 'Yahoo Finance (GC=F)',
-  };
+  throw new Error('Yahoo: all symbols failed');
 }
 
 // ── Source 2: GoldPriceZ (44K requests/month) ──
