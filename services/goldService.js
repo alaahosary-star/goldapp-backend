@@ -51,7 +51,40 @@ async function fetchFromAlphaVantage() {
   };
 }
 
-// ── Source 1: Stooq.com — XAU/USD سعر فوري حقيقي، مجاني، بدون مفتاح ──
+// ── Source 1: open.er-api.com — XAU/USD سعر فوري، مجاني، بدون مفتاح ──
+async function fetchFromErApi() {
+  const { data } = await axios.get('https://open.er-api.com/v6/latest/XAU', {
+    timeout: TIMEOUT(),
+  });
+
+  if (data.result !== 'success') throw new Error('ErApi: non-success');
+
+  const pricePerOunce = data.rates?.USD;
+  if (!pricePerOunce || pricePerOunce <= 0) throw new Error('ErApi: invalid price');
+
+  const cached = cache.get('erapi_prev_close');
+  const prevClose = cached || pricePerOunce;
+  if (!cached) cache.set('erapi_prev_close', pricePerOunce, 86400);
+
+  const change = +(pricePerOunce - prevClose).toFixed(2);
+  const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+
+  return {
+    success: true,
+    price_per_ounce: pricePerOunce,
+    price_per_gram: +(pricePerOunce / TROY_OUNCE_TO_GRAM).toFixed(2),
+    change,
+    change_percent: changePercent,
+    prev_close: prevClose,
+    open_price: prevClose,
+    high_price: pricePerOunce,
+    low_price: pricePerOunce,
+    last_updated: data.time_last_update_utc || new Date().toISOString(),
+    source: 'ExchangeRate API (XAU/USD Spot)',
+  };
+}
+
+// ── Source 1b: Stooq.com — XAU/USD سعر فوري حقيقي، مجاني، بدون مفتاح ──
 async function fetchFromStooq() {
   const { data } = await axios.get(
     'https://stooq.com/q/l/?s=xauusd&f=sd2t2ohlcv&e=json',
@@ -201,10 +234,11 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'Alpha Vantage', fn: fetchFromAlphaVantage },
+    { name: 'ErApi XAU',    fn: fetchFromErApi },
+    { name: 'Alpha Vantage',fn: fetchFromAlphaVantage },
     { name: 'GoldPriceZ',   fn: fetchFromGoldPriceZ },
     { name: 'Stooq',        fn: fetchFromStooq },
-    { name: 'Yahoo GC=F',   fn: fetchFromYahoo },
+    { name: 'Yahoo',        fn: fetchFromYahoo },
     { name: 'Metals.dev',   fn: fetchFromMetalsDev },
   ];
 
