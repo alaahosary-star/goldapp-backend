@@ -4,10 +4,11 @@ const cache = require('../cache');
 const TROY_OUNCE_TO_GRAM = 31.1035;
 const KARATS = { 24: 1.0, 22: 0.9167, 21: 0.875, 18: 0.75 };
 
-const API_KEY        = () => process.env.GOLD_API_KEY;
-const GOLDPRICEZ_KEY = () => process.env.GOLDPRICEZ_API_KEY;
-const TIMEOUT        = () => parseInt(process.env.API_TIMEOUT) || 10000;
-const CACHE_TTL      = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
+const API_KEY           = () => process.env.GOLD_API_KEY;
+const GOLDPRICEZ_KEY    = () => process.env.GOLDPRICEZ_API_KEY;
+const ALPHAVANTAGE_KEY  = () => process.env.ALPHAVANTAGE_API_KEY;
+const TIMEOUT           = () => parseInt(process.env.API_TIMEOUT) || 10000;
+const CACHE_TTL         = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
 
 // ── Helper ──────────────────────────────────────────────────────────────────
 function buildResult(price, prevClose, high, low, updatedAt, source) {
@@ -28,7 +29,34 @@ function buildResult(price, prevClose, high, low, updatedAt, source) {
   };
 }
 
-// ── Source 0: open.er-api.com — XAU من نفس API العملات (مجاني، بدون مفتاح) ──
+// ── Source 0: Alpha Vantage — XAU/USD Spot ───────────────────────────────────
+async function fetchFromAlphaVantage() {
+  const key = ALPHAVANTAGE_KEY();
+  if (!key) throw new Error('No AV key');
+
+  const { data } = await axios.get('https://www.alphavantage.co/query', {
+    params: { function: 'CURRENCY_EXCHANGE_RATE', from_currency: 'XAU', to_currency: 'USD', apikey: key },
+    timeout: TIMEOUT(),
+  });
+
+  // لو رجع rate limit أو error — اطبع الـ response علشان نشوف المشكلة
+  const info = data?.['Realtime Currency Exchange Rate'];
+  if (!info) {
+    console.error('AV raw response:', JSON.stringify(data).substring(0, 200));
+    throw new Error('AV: no exchange rate data');
+  }
+
+  const price = parseFloat(info['5. Exchange Rate']);
+  if (!price || price <= 0) throw new Error('AV: invalid price');
+
+  const bid   = parseFloat(info['8. Bid Price']) || price;
+  const prev  = cache.get('av_prev') || bid;
+  cache.set('av_prev', price, 86400);
+
+  return buildResult(price, prev, price, price, info['6. Last Refreshed'], 'Alpha Vantage (XAU/USD Spot)');
+}
+
+// ── Source 0b: open.er-api.com — XAU من نفس API العملات (مجاني، بدون مفتاح) ──
 async function fetchFromErApiXAU() {
   const { data } = await axios.get('https://open.er-api.com/v6/latest/USD', {
     timeout: TIMEOUT(),
@@ -125,10 +153,11 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'ErApi XAU',  fn: fetchFromErApiXAU },
-    { name: 'GoldPriceZ', fn: fetchFromGoldPriceZ },
-    { name: 'Yahoo',      fn: fetchFromYahoo },
-    { name: 'Metals.dev', fn: fetchFromMetalsDev },
+    { name: 'AlphaVantage',fn: fetchFromAlphaVantage },
+    { name: 'ErApi XAU',   fn: fetchFromErApiXAU },
+    { name: 'GoldPriceZ',  fn: fetchFromGoldPriceZ },
+    { name: 'Yahoo',       fn: fetchFromYahoo },
+    { name: 'Metals.dev',  fn: fetchFromMetalsDev },
   ];
 
   for (const src of sources) {
