@@ -289,4 +289,106 @@ async function generateSmartHistory(days) {
   return { success: true, data: points };
 }
 
-module.exports = { fetchGoldPrice, getLocalPrices, fetchGoldHistory };
+// ══════════════════════════════════════════════════════════════════════════════
+// SILVER
+// ══════════════════════════════════════════════════════════════════════════════
+
+function buildSilverResult(price, prevClose, high, low, updatedAt, source) {
+  const change = +(price - prevClose).toFixed(2);
+  const changePercent = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+  return {
+    success: true,
+    price_per_ounce: price,
+    price_per_gram: +(price / TROY_OUNCE_TO_GRAM).toFixed(4),
+    change,
+    change_percent: changePercent,
+    prev_close: prevClose,
+    high_price: high || price,
+    low_price:  low  || price,
+    last_updated: updatedAt || new Date().toISOString(),
+    source,
+  };
+}
+
+// Source A: open.er-api — XAG/USD (free, no key)
+async function fetchSilverFromErApi() {
+  const { data } = await axios.get('https://open.er-api.com/v6/latest/USD', {
+    timeout: TIMEOUT(),
+  });
+  if (data.result !== 'success') throw new Error('ErApi: non-success');
+  const xagRate = data.rates?.XAG;
+  if (!xagRate || xagRate <= 0) throw new Error('ErApi: XAG not in rates');
+  const price = +(1 / xagRate).toFixed(4);
+  if (price < 5 || price > 200) throw new Error('ErApi: silver price out of range');
+  const prev = cache.get('erapi_xag_prev') || price;
+  cache.set('erapi_xag_prev', price, 86400);
+  return buildSilverResult(price, prev, price, price, data.time_last_update_utc, 'Spot (XAG/USD)');
+}
+
+// Source B: Yahoo Finance — SI=F (silver futures)
+async function fetchSilverFromYahoo() {
+  const { data } = await axios.get(
+    'https://query1.finance.yahoo.com/v8/finance/chart/SI=F',
+    {
+      params: { interval: '1d', range: '5d' },
+      timeout: TIMEOUT(),
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    }
+  );
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error('Yahoo Silver: no result');
+  const meta = result.meta;
+  const price = meta.regularMarketPrice || meta.previousClose;
+  if (!price || price <= 0) throw new Error('Yahoo Silver: invalid price');
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  const validCloses = closes.filter(c => c && c > 0);
+  const prev = validCloses.length >= 2
+    ? validCloses[validCloses.length - 2]
+    : (meta.chartPreviousClose || meta.previousClose || price);
+  return buildSilverResult(
+    price, +prev.toFixed(4),
+    meta.regularMarketDayHigh || price,
+    meta.regularMarketDayLow  || price,
+    new Date().toISOString(),
+    'Yahoo Finance (SI=F)'
+  );
+}
+
+// Source C: Metals.dev (shares the same 100 req/month pool — used as last resort)
+async function fetchSilverFromMetalsDev() {
+  const key = API_KEY();
+  if (!key) throw new Error('No metals.dev key');
+  const { data } = await axios.get('https://api.metals.dev/v1/metal/spot', {
+    params: { api_key: key, metal: 'silver', currency: 'USD' },
+    timeout: TIMEOUT(),
+  });
+  if (data.status !== 'success') throw new Error('Metals.dev silver: non-success');
+  const r = data.rate;
+  return buildSilverResult(r.price, +(r.price - (r.change || 0)).toFixed(4), r.high || r.price, r.low || r.price, data.timestamp, 'Metals.dev');
+}
+
+async function fetchSilverPrice() {
+  const cached = cache.get('silver_price_usd');
+  if (cached) return cached;
+
+  const sources = [
+    { name: 'ErApi XAG',   fn: fetchSilverFromErApi },
+    { name: 'Yahoo SI=F',  fn: fetchSilverFromYahoo },
+    { name: 'Metals.dev',  fn: fetchSilverFromMetalsDev },
+  ];
+
+  for (const src of sources) {
+    try {
+      const result = await src.fn();
+      console.log(`✅ Silver ${src.name}: $${result.price_per_ounce}`);
+      cache.set('silver_price_usd', result, CACHE_TTL());
+      return result;
+    } catch (err) {
+      console.error(`❌ Silver ${src.name} failed:`, err.message);
+    }
+  }
+
+  return { success: false, error: 'All silver APIs failed' };
+}
+
+module.exports = { fetchGoldPrice, getLocalPrices, fetchGoldHistory, fetchSilverPrice };
