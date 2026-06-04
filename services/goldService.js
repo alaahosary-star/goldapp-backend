@@ -7,8 +7,8 @@ const KARATS = { 24: 1.0, 22: 0.9167, 21: 0.875, 18: 0.75 };
 const API_KEY           = () => process.env.GOLD_API_KEY;
 const GOLDPRICEZ_KEY    = () => process.env.GOLDPRICEZ_API_KEY;
 const ALPHAVANTAGE_KEY  = () => process.env.ALPHAVANTAGE_API_KEY;
-const TIMEOUT           = () => parseInt(process.env.API_TIMEOUT) || 10000;
-const CACHE_TTL         = () => parseInt(process.env.GOLD_CACHE_TTL) || 300;
+const TIMEOUT           = () => parseInt(process.env.API_TIMEOUT) || 8000;
+const CACHE_TTL         = () => parseInt(process.env.GOLD_CACHE_TTL) || 120;
 
 // ── Helper ──────────────────────────────────────────────────────────────────
 function buildResult(price, prevClose, high, low, updatedAt, source) {
@@ -39,7 +39,6 @@ async function fetchFromAlphaVantage() {
     timeout: TIMEOUT(),
   });
 
-  // لو رجع rate limit أو error — اطبع الـ response علشان نشوف المشكلة
   const info = data?.['Realtime Currency Exchange Rate'];
   if (!info) {
     console.error('AV raw response:', JSON.stringify(data).substring(0, 200));
@@ -54,27 +53,6 @@ async function fetchFromAlphaVantage() {
   cache.set('av_prev', price, 86400);
 
   return buildResult(price, prev, price, price, info['6. Last Refreshed'], 'Alpha Vantage (XAU/USD Spot)');
-}
-
-// ── Source 0b: open.er-api.com — XAU من نفس API العملات (مجاني، بدون مفتاح) ──
-async function fetchFromErApiXAU() {
-  const { data } = await axios.get('https://open.er-api.com/v6/latest/USD', {
-    timeout: TIMEOUT(),
-  });
-
-  if (data.result !== 'success') throw new Error('ErApi: non-success');
-
-  const xauRate = data.rates?.XAU; // كم أونصة في الدولار الواحد
-  if (!xauRate || xauRate <= 0) throw new Error('ErApi: XAU not in rates');
-
-  const price = +(1 / xauRate).toFixed(2); // سعر الأونصة بالدولار
-  if (price < 500 || price > 20000) throw new Error('ErApi: price out of range');
-
-  const prev = cache.get('erapi_xau_prev') || price;
-  cache.set('erapi_xau_prev', price, 86400);
-
-  return buildResult(price, prev, price, price,
-    data.time_last_update_utc, 'Spot (XAU/USD)');
 }
 
 // ── Source 1: GoldPriceZ (44K req/month) ────────────────────────────────────
@@ -98,8 +76,41 @@ async function fetchFromGoldPriceZ() {
   return buildResult(price, prev, high, low, data.gmt_ounce_price_usd_updated, 'GoldPriceZ (XAU/USD Spot)');
 }
 
-// ── Source 2: Yahoo Finance v8 chart — GC=F ──────────────────────────────────
-async function fetchFromYahoo() {
+// ── Source 2: Yahoo Finance — XAUUSD=X (SPOT, not futures) ───────────────────
+async function fetchFromYahooSpot() {
+  const { data } = await axios.get(
+    'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X',
+    {
+      params: { interval: '1d', range: '5d' },
+      timeout: TIMEOUT(),
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    }
+  );
+
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error('Yahoo Spot: no result');
+
+  const meta  = result.meta;
+  const price = meta.regularMarketPrice || meta.previousClose;
+  if (!price || price <= 0) throw new Error('Yahoo Spot: invalid price');
+
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  const validCloses = closes.filter(c => c && c > 0);
+  const prev = validCloses.length >= 2
+    ? validCloses[validCloses.length - 2]
+    : (meta.chartPreviousClose || meta.previousClose || price);
+
+  return buildResult(
+    +price.toFixed(2), +prev.toFixed(2),
+    meta.regularMarketDayHigh || price,
+    meta.regularMarketDayLow  || price,
+    new Date().toISOString(),
+    'Yahoo Finance (XAU/USD Spot)'
+  );
+}
+
+// ── Source 3: Yahoo Finance — GC=F (futures fallback, adjust for premium) ────
+async function fetchFromYahooFutures() {
   const { data } = await axios.get(
     'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
     {
@@ -110,29 +121,36 @@ async function fetchFromYahoo() {
   );
 
   const result = data?.chart?.result?.[0];
-  if (!result) throw new Error('Yahoo: no result');
+  if (!result) throw new Error('Yahoo Futures: no result');
 
   const meta  = result.meta;
-  const price = meta.regularMarketPrice || meta.previousClose;
-  if (!price || price <= 0) throw new Error('Yahoo: invalid price');
+  let price = meta.regularMarketPrice || meta.previousClose;
+  if (!price || price <= 0) throw new Error('Yahoo Futures: invalid price');
 
-  // نأخذ سعر إغلاق أمس الحقيقي من بيانات الـ chart (مش meta.previousClose اللي بيتساوى أحياناً مع الحالي)
+  // Adjust futures premium (~0.5% typical contango)
+  const FUTURES_PREMIUM_FACTOR = 0.995;
+  price = +(price * FUTURES_PREMIUM_FACTOR).toFixed(2);
+
   const closes = result.indicators?.quote?.[0]?.close || [];
   const validCloses = closes.filter(c => c && c > 0);
-  const prev = validCloses.length >= 2
-    ? validCloses[validCloses.length - 2]   // إغلاق اليوم السابق فعلاً
+  let prev = validCloses.length >= 2
+    ? validCloses[validCloses.length - 2]
     : (meta.chartPreviousClose || meta.previousClose || price);
+  prev = +(prev * FUTURES_PREMIUM_FACTOR).toFixed(2);
+
+  let high = meta.regularMarketDayHigh || price;
+  let low  = meta.regularMarketDayLow  || price;
+  high = +(high * FUTURES_PREMIUM_FACTOR).toFixed(2);
+  low  = +(low * FUTURES_PREMIUM_FACTOR).toFixed(2);
 
   return buildResult(
-    price, +prev.toFixed(2),
-    meta.regularMarketDayHigh || price,
-    meta.regularMarketDayLow  || price,
+    price, prev, high, low,
     new Date().toISOString(),
-    'Yahoo Finance (GC=F)'
+    'Yahoo Finance (GC=F adj.)'
   );
 }
 
-// ── Source 3: Metals.dev (100 req/month) ────────────────────────────────────
+// ── Source 4: Metals.dev (100 req/month) ────────────────────────────────────
 async function fetchFromMetalsDev() {
   const key = API_KEY();
   if (!key) throw new Error('No metals.dev key');
@@ -153,11 +171,11 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'AlphaVantage',fn: fetchFromAlphaVantage },
-    { name: 'ErApi XAU',   fn: fetchFromErApiXAU },
-    { name: 'GoldPriceZ',  fn: fetchFromGoldPriceZ },
-    { name: 'Yahoo',       fn: fetchFromYahoo },
-    { name: 'Metals.dev',  fn: fetchFromMetalsDev },
+    { name: 'AlphaVantage',  fn: fetchFromAlphaVantage },
+    { name: 'GoldPriceZ',    fn: fetchFromGoldPriceZ },
+    { name: 'Yahoo Spot',    fn: fetchFromYahooSpot },
+    { name: 'Yahoo Futures', fn: fetchFromYahooFutures },
+    { name: 'Metals.dev',    fn: fetchFromMetalsDev },
   ];
 
   for (const src of sources) {
@@ -233,7 +251,7 @@ async function fetchGoldHistory(days = 30) {
   try {
     const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
     const { data } = await axios.get(
-      'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
+      'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X',
       {
         params: { interval: '1d', range },
         timeout: TIMEOUT(),
@@ -256,13 +274,49 @@ async function fetchGoldHistory(days = 30) {
         .slice(-days);
 
       if (points.length > 0) {
-        const histResult = { success: true, data: points, source: 'Yahoo Finance' };
+        const histResult = { success: true, data: points, source: 'Yahoo Finance (XAU/USD)' };
         cache.set(cacheKey, histResult, 7200);
         return histResult;
       }
     }
   } catch (err) {
     console.error('Yahoo history error:', err.message);
+  }
+
+  // Fallback: try GC=F
+  try {
+    const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
+    const { data } = await axios.get(
+      'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
+      {
+        params: { interval: '1d', range },
+        timeout: TIMEOUT(),
+        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      }
+    );
+
+    const result = data?.chart?.result?.[0];
+    if (result?.timestamp && result?.indicators?.quote?.[0]?.close) {
+      const timestamps = result.timestamp;
+      const closes     = result.indicators.quote[0].close;
+
+      const points = timestamps
+        .map((ts, i) => ({
+          timestamp: ts * 1000,
+          price: closes[i] ? +(closes[i] * 0.995).toFixed(2) : null,
+          date: new Date(ts * 1000).toLocaleDateString(),
+        }))
+        .filter(p => p.price && p.price > 0)
+        .slice(-days);
+
+      if (points.length > 0) {
+        const histResult = { success: true, data: points, source: 'Yahoo Finance' };
+        cache.set(cacheKey, histResult, 7200);
+        return histResult;
+      }
+    }
+  } catch (err) {
+    console.error('Yahoo GC=F history error:', err.message);
   }
 
   return generateSmartHistory(days);
@@ -310,22 +364,36 @@ function buildSilverResult(price, prevClose, high, low, updatedAt, source) {
   };
 }
 
-// Source A: open.er-api — XAG/USD (free, no key)
-async function fetchSilverFromErApi() {
-  const { data } = await axios.get('https://open.er-api.com/v6/latest/USD', {
-    timeout: TIMEOUT(),
-  });
-  if (data.result !== 'success') throw new Error('ErApi: non-success');
-  const xagRate = data.rates?.XAG;
-  if (!xagRate || xagRate <= 0) throw new Error('ErApi: XAG not in rates');
-  const price = +(1 / xagRate).toFixed(4);
-  if (price < 5 || price > 200) throw new Error('ErApi: silver price out of range');
-  const prev = cache.get('erapi_xag_prev') || price;
-  cache.set('erapi_xag_prev', price, 86400);
-  return buildSilverResult(price, prev, price, price, data.time_last_update_utc, 'Spot (XAG/USD)');
+// Source A: Yahoo Finance — XAGUSD=X (spot silver)
+async function fetchSilverFromYahooSpot() {
+  const { data } = await axios.get(
+    'https://query1.finance.yahoo.com/v8/finance/chart/XAGUSD=X',
+    {
+      params: { interval: '1d', range: '5d' },
+      timeout: TIMEOUT(),
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    }
+  );
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error('Yahoo Silver Spot: no result');
+  const meta = result.meta;
+  const price = meta.regularMarketPrice || meta.previousClose;
+  if (!price || price <= 0) throw new Error('Yahoo Silver Spot: invalid price');
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  const validCloses = closes.filter(c => c && c > 0);
+  const prev = validCloses.length >= 2
+    ? validCloses[validCloses.length - 2]
+    : (meta.chartPreviousClose || meta.previousClose || price);
+  return buildSilverResult(
+    +price.toFixed(4), +prev.toFixed(4),
+    meta.regularMarketDayHigh || price,
+    meta.regularMarketDayLow  || price,
+    new Date().toISOString(),
+    'Yahoo Finance (XAG/USD Spot)'
+  );
 }
 
-// Source B: Yahoo Finance — SI=F (silver futures)
+// Source B: Yahoo Finance — SI=F (silver futures fallback)
 async function fetchSilverFromYahoo() {
   const { data } = await axios.get(
     'https://query1.finance.yahoo.com/v8/finance/chart/SI=F',
@@ -346,7 +414,7 @@ async function fetchSilverFromYahoo() {
     ? validCloses[validCloses.length - 2]
     : (meta.chartPreviousClose || meta.previousClose || price);
   return buildSilverResult(
-    price, +prev.toFixed(4),
+    +price.toFixed(4), +prev.toFixed(4),
     meta.regularMarketDayHigh || price,
     meta.regularMarketDayLow  || price,
     new Date().toISOString(),
@@ -372,9 +440,9 @@ async function fetchSilverPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'ErApi XAG',   fn: fetchSilverFromErApi },
-    { name: 'Yahoo SI=F',  fn: fetchSilverFromYahoo },
-    { name: 'Metals.dev',  fn: fetchSilverFromMetalsDev },
+    { name: 'Yahoo XAG Spot', fn: fetchSilverFromYahooSpot },
+    { name: 'Yahoo SI=F',     fn: fetchSilverFromYahoo },
+    { name: 'Metals.dev',     fn: fetchSilverFromMetalsDev },
   ];
 
   for (const src of sources) {
