@@ -171,10 +171,9 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'AlphaVantage',  fn: fetchFromAlphaVantage },
     { name: 'GoldPriceZ',    fn: fetchFromGoldPriceZ },
+    { name: 'AlphaVantage',  fn: fetchFromAlphaVantage },
     { name: 'Yahoo Spot',    fn: fetchFromYahooSpot },
-    { name: 'Yahoo Futures', fn: fetchFromYahooFutures },
     { name: 'Metals.dev',    fn: fetchFromMetalsDev },
   ];
 
