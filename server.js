@@ -89,6 +89,16 @@ app.get('/api/currency/rates', safe(async (req, res) => {
   res.status(data.success ? 200 : 502).json(data);
 }));
 
+app.get('/api/currency/history', safe(async (req, res) => {
+  const currency = (req.query.currency || 'EGP').toUpperCase();
+  if (!VALID_CURRENCY.test(currency)) {
+    return res.status(400).json({ success: false, error: 'Invalid currency code' });
+  }
+  const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 365);
+  const data = await currencyService.getHistory(currency, days);
+  res.status(data.success ? 200 : 502).json(data);
+}));
+
 app.post('/api/currency/convert', safe(async (req, res) => {
   const { from, to, amount } = req.body;
   if (!from || !to || !amount) {

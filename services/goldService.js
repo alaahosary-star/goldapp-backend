@@ -247,34 +247,51 @@ async function fetchGoldHistory(days = 30) {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
+  // For 1-Day we need INTRADAY (hourly) data, not a single daily candle.
+  const intraday = days <= 1;
+  const interval = intraday ? '60m' : '1d';
+  const range = intraday
+    ? '5d' // 5d of hourly data, we trim to the last 24h below (covers weekends/closed market)
+    : days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
+
+  // Builds + trims the points array from a Yahoo result.
+  const buildPoints = (result, factor = 1) => {
+    const timestamps = result.timestamp;
+    const closes = result.indicators.quote[0].close;
+    let points = timestamps
+      .map((ts, i) => ({
+        timestamp: ts * 1000,
+        price: closes[i] ? +(closes[i] * factor).toFixed(2) : null,
+        date: new Date(ts * 1000).toLocaleDateString(),
+      }))
+      .filter(p => p.price && p.price > 0);
+
+    if (intraday) {
+      // keep only the most recent ~24 hours of hourly points
+      const last = points.length ? points[points.length - 1].timestamp : Date.now();
+      points = points.filter(p => p.timestamp >= last - 24 * 60 * 60 * 1000);
+    } else {
+      points = points.slice(-days);
+    }
+    return points;
+  };
+
+  // Source 1: XAU/USD spot
   try {
-    const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
     const { data } = await axios.get(
       'https://query1.finance.yahoo.com/v8/finance/chart/XAUUSD=X',
       {
-        params: { interval: '1d', range },
+        params: { interval, range },
         timeout: TIMEOUT(),
         headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
       }
     );
-
     const result = data?.chart?.result?.[0];
     if (result?.timestamp && result?.indicators?.quote?.[0]?.close) {
-      const timestamps = result.timestamp;
-      const closes     = result.indicators.quote[0].close;
-
-      const points = timestamps
-        .map((ts, i) => ({
-          timestamp: ts * 1000,
-          price: closes[i] ? +closes[i].toFixed(2) : null,
-          date: new Date(ts * 1000).toLocaleDateString(),
-        }))
-        .filter(p => p.price && p.price > 0)
-        .slice(-days);
-
-      if (points.length > 0) {
+      const points = buildPoints(result);
+      if (points.length > 1) {
         const histResult = { success: true, data: points, source: 'Yahoo Finance (XAU/USD)' };
-        cache.set(cacheKey, histResult, 7200);
+        cache.set(cacheKey, histResult, intraday ? 900 : 7200);
         return histResult;
       }
     }
@@ -282,35 +299,22 @@ async function fetchGoldHistory(days = 30) {
     console.error('Yahoo history error:', err.message);
   }
 
-  // Fallback: try GC=F
+  // Source 2: GC=F futures (adjust premium ~0.5%)
   try {
-    const range = days <= 7 ? '5d' : days <= 30 ? '1mo' : days <= 90 ? '3mo' : '6mo';
     const { data } = await axios.get(
       'https://query1.finance.yahoo.com/v8/finance/chart/GC=F',
       {
-        params: { interval: '1d', range },
+        params: { interval, range },
         timeout: TIMEOUT(),
         headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
       }
     );
-
     const result = data?.chart?.result?.[0];
     if (result?.timestamp && result?.indicators?.quote?.[0]?.close) {
-      const timestamps = result.timestamp;
-      const closes     = result.indicators.quote[0].close;
-
-      const points = timestamps
-        .map((ts, i) => ({
-          timestamp: ts * 1000,
-          price: closes[i] ? +(closes[i] * 0.995).toFixed(2) : null,
-          date: new Date(ts * 1000).toLocaleDateString(),
-        }))
-        .filter(p => p.price && p.price > 0)
-        .slice(-days);
-
-      if (points.length > 0) {
+      const points = buildPoints(result, 0.995);
+      if (points.length > 1) {
         const histResult = { success: true, data: points, source: 'Yahoo Finance' };
-        cache.set(cacheKey, histResult, 7200);
+        cache.set(cacheKey, histResult, intraday ? 900 : 7200);
         return histResult;
       }
     }
@@ -322,13 +326,15 @@ async function fetchGoldHistory(days = 30) {
 }
 
 async function generateSmartHistory(days) {
+  const intraday  = days <= 1;
   const gold      = await fetchGoldPrice();
   const basePrice = gold.success ? gold.price_per_ounce : 2400;
-  const volatility = basePrice * 0.02;
+  const volatility = basePrice * (intraday ? 0.005 : 0.02);
   const points    = [];
   const now       = Date.now();
-  const totalPoints = Math.min(days * 2, 100);
-  const interval  = (days * 24 * 60 * 60 * 1000) / totalPoints;
+  const totalPoints = intraday ? 24 : Math.min(days * 2, 100);
+  const spanMs    = (intraday ? 1 : days) * 24 * 60 * 60 * 1000;
+  const interval  = spanMs / totalPoints;
   let price = basePrice - Math.random() * volatility * 2;
 
   for (let i = totalPoints; i >= 0; i--) {
