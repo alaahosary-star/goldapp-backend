@@ -5,7 +5,6 @@ const TROY_OUNCE_TO_GRAM = 31.1035;
 const KARATS = { 24: 1.0, 22: 0.9167, 21: 0.875, 18: 0.75 };
 
 const API_KEY           = () => process.env.GOLD_API_KEY;
-const GOLDPRICEZ_KEY    = () => process.env.GOLDPRICEZ_API_KEY;
 const ALPHAVANTAGE_KEY  = () => process.env.ALPHAVANTAGE_API_KEY;
 const TIMEOUT           = () => parseInt(process.env.API_TIMEOUT) || 8000;
 const CACHE_TTL         = () => parseInt(process.env.GOLD_CACHE_TTL) || 120;
@@ -55,25 +54,20 @@ async function fetchFromAlphaVantage() {
   return buildResult(price, prev, price, price, info['6. Last Refreshed'], 'Alpha Vantage (XAU/USD Spot)');
 }
 
-// ── Source 1: GoldPriceZ (44K req/month) ────────────────────────────────────
-async function fetchFromGoldPriceZ() {
-  const key = GOLDPRICEZ_KEY();
-  if (!key) throw new Error('No GoldPriceZ key');
-
+// ── Source 1: gold-api.com (free, no API key required) ───────────────────────
+async function fetchFromGoldApi() {
   const { data } = await axios.get(
-    'https://goldpricez.com/api/rates/currency/usd/measure/ounce',
-    { headers: { 'X-API-KEY': key }, timeout: TIMEOUT() }
+    'https://api.gold-api.com/price/XAU',
+    { headers: { Accept: 'application/json' }, timeout: TIMEOUT() }
   );
 
-  const price = parseFloat(data.ounce_price_usd);
-  if (!price || price <= 0) throw new Error('GoldPriceZ: invalid price');
+  const price = parseFloat(data.price);
+  if (!price || price <= 0) throw new Error('gold-api.com: invalid price');
 
-  const high = parseFloat(data.ounce_price_usd_today_high) || price;
-  const low  = parseFloat(data.ounce_price_usd_today_low)  || price;
-  const prev = cache.get('gpz_prev') || price;
-  cache.set('gpz_prev', price, 86400);
+  const prev = cache.get('goldapi_prev') || price;
+  cache.set('goldapi_prev', price, 86400);
 
-  return buildResult(price, prev, high, low, data.gmt_ounce_price_usd_updated, 'GoldPriceZ (XAU/USD Spot)');
+  return buildResult(price, prev, price, price, data.updatedAt, 'gold-api.com (XAU/USD Spot)');
 }
 
 // ── Source 2: Yahoo Finance — XAUUSD=X (SPOT, not futures) ───────────────────
@@ -171,7 +165,7 @@ async function fetchGoldPrice() {
   if (cached) return cached;
 
   const sources = [
-    { name: 'GoldPriceZ',    fn: fetchFromGoldPriceZ },
+    { name: 'gold-api.com',  fn: fetchFromGoldApi },
     { name: 'AlphaVantage',  fn: fetchFromAlphaVantage },
     { name: 'Yahoo Spot',    fn: fetchFromYahooSpot },
     { name: 'Metals.dev',    fn: fetchFromMetalsDev },
